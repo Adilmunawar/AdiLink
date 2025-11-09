@@ -12,7 +12,7 @@ serve(async (req) => {
   }
 
   try {
-    const { jobDescription, limit = 20 } = await req.json();
+    const { jobDescription } = await req.json();
 
     if (!jobDescription) {
       return new Response(
@@ -190,7 +190,7 @@ ${candidateSummaries.map(c => c.summary).join('\n\n---\n\n')}`
       
       // Return all candidates with default scores as fallback
       console.log('Returning fallback results with default scores');
-      const fallbackMatches = profiles.slice(0, limit).map((profile, index) => ({
+      const fallbackMatches = profiles.map((profile, index) => ({
         ...profile,
         matchScore: 50,
         reasoning: 'AI ranking temporarily unavailable - showing all candidates',
@@ -222,18 +222,17 @@ ${candidateSummaries.map(c => c.summary).join('\n\n---\n\n')}`
       const extractedData = functionCall.args?.candidates || [];
       console.log(`Gemini extracted ${extractedData.length} candidates with details`);
       
-      // Sort by match score descending
+      // Sort by match score descending - return ALL candidates
       rankedCandidates = extractedData
-        .sort((a: any, b: any) => (b.matchScore || 0) - (a.matchScore || 0))
-        .slice(0, limit);
+        .sort((a: any, b: any) => (b.matchScore || 0) - (a.matchScore || 0));
         
       console.log(`Successfully ranked ${rankedCandidates.length} candidates`);
     } catch (e) {
       console.error('Failed to parse Gemini ranking response:', e);
       console.error('Full AI response:', JSON.stringify(aiData, null, 2));
       
-      // Fallback: return candidates with default scores and attempt basic extraction
-      rankedCandidates = profiles.slice(0, limit).map((profile, index) => {
+      // Fallback: return ALL candidates with default scores and attempt basic extraction
+      rankedCandidates = profiles.map((profile, index) => {
         const text = profile.resume_text || '';
         const lines = text.split('\n').filter((l: string) => l.trim());
         

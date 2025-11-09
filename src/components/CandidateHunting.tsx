@@ -1,10 +1,20 @@
 import { useState } from 'react';
-import { Search, Sparkles, Award, MapPin, Briefcase, TrendingUp, AlertCircle } from 'lucide-react';
+import { supabase } from '@/integrations/supabase/client';
+import { Search, Sparkles, Award, MapPin, Download } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Textarea } from '@/components/ui/textarea';
 import { Badge } from '@/components/ui/badge';
 import { useToast } from '@/hooks/use-toast';
+import {
+  Pagination,
+  PaginationContent,
+  PaginationEllipsis,
+  PaginationItem,
+  PaginationLink,
+  PaginationNext,
+  PaginationPrevious,
+} from '@/components/ui/pagination';
 
 interface CandidateMatch {
   id: string;
@@ -25,7 +35,85 @@ export const CandidateHunting = () => {
   const [jobDescription, setJobDescription] = useState('');
   const [searching, setSearching] = useState(false);
   const [matches, setMatches] = useState<CandidateMatch[]>([]);
+  const [totalCandidates, setTotalCandidates] = useState(0);
+  const [currentPage, setCurrentPage] = useState(1);
   const { toast } = useToast();
+  
+  const itemsPerPage = 10;
+
+  const exportToCSV = () => {
+    if (matches.length === 0) {
+      toast({
+        title: 'No Data to Export',
+        description: 'Please search for candidates first',
+        variant: 'destructive',
+      });
+      return;
+    }
+
+    // Create CSV headers
+    const headers = [
+      'Rank',
+      'Full Name',
+      'Email',
+      'Phone Number',
+      'Location',
+      'Job Title',
+      'Years of Experience',
+      'Match %',
+      'Key Strengths',
+      'Potential Concerns',
+      'Reasoning',
+      'Resume URL'
+    ];
+
+    // Create CSV rows
+    const rows = matches.map((candidate, index) => [
+      index + 1,
+      candidate.full_name || '',
+      candidate.email || '',
+      candidate.phone_number || '',
+      candidate.location || '',
+      candidate.job_title || '',
+      candidate.years_of_experience || '',
+      candidate.matchScore,
+      candidate.strengths.join('; '),
+      candidate.concerns.join('; '),
+      candidate.reasoning || '',
+      candidate.resume_file_url || ''
+    ]);
+
+    // Combine headers and rows
+    const csvContent = [
+      headers.join(','),
+      ...rows.map(row => row.map(cell => {
+        // Escape commas and quotes in cell content
+        const cellStr = String(cell);
+        if (cellStr.includes(',') || cellStr.includes('"') || cellStr.includes('\n')) {
+          return `"${cellStr.replace(/"/g, '""')}"`;
+        }
+        return cellStr;
+      }).join(','))
+    ].join('\n');
+
+    // Create blob and download
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement('a');
+    const url = URL.createObjectURL(blob);
+    
+    link.setAttribute('href', url);
+    link.setAttribute('download', `candidate_matches_${new Date().toISOString().split('T')[0]}.csv`);
+    link.style.visibility = 'hidden';
+    
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+
+    toast({
+      title: 'CSV Exported Successfully',
+      description: `Exported ${matches.length} candidates to CSV`,
+    });
+  };
 
   const handleSearch = async () => {
     if (!jobDescription.trim()) {
@@ -40,28 +128,21 @@ export const CandidateHunting = () => {
     setSearching(true);
 
     try {
-      const response = await fetch('https://olkbhjyfpdvcovtuekzt.supabase.co/functions/v1/match-candidates', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          jobDescription,
-          limit: 20,
-        }),
+      const { data, error } = await supabase.functions.invoke('match-candidates', {
+        body: { jobDescription },
       });
 
-      if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.error || 'Failed to match candidates');
+      if (error) {
+        throw new Error(error.message || 'Failed to match candidates');
       }
 
-      const result = await response.json();
-      setMatches(result.matches || []);
+      setMatches(data.matches || []);
+      setTotalCandidates(data.total || 0);
+      setCurrentPage(1); // Reset to first page on new search
 
       toast({
         title: 'Search Complete!',
-        description: `Found ${result.matches?.length || 0} matching candidates`,
+        description: `Ranked ${data.matches?.length || 0} candidates from ${data.total || 0} total resumes`,
       });
     } catch (error) {
       console.error('Search error:', error);
@@ -109,28 +190,46 @@ export const CandidateHunting = () => {
             ) : (
               <>
                 <Search className="mr-2 h-5 w-5" />
-                Find Top 20 Candidates
+                Find All Matching Candidates
               </>
             )}
           </Button>
         </div>
       </Card>
 
-      {matches.length > 0 && (
-        <div className="space-y-4">
-          <h3 className="text-xl font-bold text-foreground flex items-center gap-2">
-            <Award className="h-6 w-6 text-primary" />
-            Top Matched Candidates
-          </h3>
+      {matches.length > 0 && (() => {
+        const totalPages = Math.ceil(matches.length / itemsPerPage);
+        const startIndex = (currentPage - 1) * itemsPerPage;
+        const endIndex = startIndex + itemsPerPage;
+        const currentMatches = matches.slice(startIndex, endIndex);
+        
+        return (
+          <div className="space-y-4">
+            <div className="flex items-center justify-between">
+              <h3 className="text-xl font-bold text-foreground flex items-center gap-2">
+                <Award className="h-6 w-6 text-primary" />
+                Ranked Candidates ({matches.length} of {totalCandidates})
+              </h3>
+              <Button
+                onClick={exportToCSV}
+                variant="outline"
+                className="flex items-center gap-2 bg-gradient-to-r from-primary/10 to-secondary/10 hover:from-primary/20 hover:to-secondary/20 border-primary/30"
+              >
+                <Download className="h-4 w-4" />
+                Export to CSV
+              </Button>
+            </div>
 
-          <div className="grid gap-4">
-            {matches.map((candidate, index) => (
-              <Card key={candidate.id} className="p-6 hover:shadow-[var(--shadow-premium)] hover:scale-[1.02] transition-all duration-300 bg-card/90 backdrop-blur-sm border border-primary/20 animate-fade-in">
-                <div className="flex items-start justify-between mb-4">
-                  <div className="flex items-center gap-3">
-                    <div className="flex items-center justify-center h-12 w-12 rounded-full bg-gradient-to-br from-primary to-secondary text-primary-foreground font-bold text-xl shadow-lg">
-                      #{index + 1}
-                    </div>
+            <div className="grid gap-4">
+              {currentMatches.map((candidate, index) => {
+                const globalIndex = startIndex + index;
+                return (
+                <Card key={candidate.id} className="p-6 hover:shadow-[var(--shadow-premium)] hover:scale-[1.02] transition-all duration-300 bg-card/90 backdrop-blur-sm border border-primary/20 animate-fade-in">
+                  <div className="flex items-start justify-between mb-4">
+                    <div className="flex items-center gap-3">
+                      <div className="flex items-center justify-center h-12 w-12 rounded-full bg-gradient-to-br from-primary to-secondary text-primary-foreground font-bold text-xl shadow-lg">
+                        #{globalIndex + 1}
+                      </div>
                     <div>
                       <h4 className="text-xl font-bold text-foreground">{candidate.full_name}</h4>
                       {candidate.job_title && (
@@ -228,10 +327,65 @@ export const CandidateHunting = () => {
                   )}
                 </div>
               </Card>
-            ))}
+            );
+            })}
           </div>
+
+          {totalPages > 1 && (
+            <Pagination className="mt-6">
+              <PaginationContent>
+                <PaginationItem>
+                  <PaginationPrevious 
+                    onClick={() => setCurrentPage(prev => Math.max(1, prev - 1))}
+                    className={currentPage === 1 ? 'pointer-events-none opacity-50' : 'cursor-pointer'}
+                  />
+                </PaginationItem>
+                
+                {Array.from({ length: totalPages }, (_, i) => i + 1).map(page => {
+                  // Show first page, last page, current page, and pages around current
+                  const showPage = 
+                    page === 1 || 
+                    page === totalPages || 
+                    (page >= currentPage - 1 && page <= currentPage + 1);
+                  
+                  const showEllipsisBefore = page === currentPage - 2 && currentPage > 3;
+                  const showEllipsisAfter = page === currentPage + 2 && currentPage < totalPages - 2;
+                  
+                  if (showEllipsisBefore || showEllipsisAfter) {
+                    return (
+                      <PaginationItem key={page}>
+                        <PaginationEllipsis />
+                      </PaginationItem>
+                    );
+                  }
+                  
+                  if (!showPage) return null;
+                  
+                  return (
+                    <PaginationItem key={page}>
+                      <PaginationLink
+                        onClick={() => setCurrentPage(page)}
+                        isActive={currentPage === page}
+                        className="cursor-pointer"
+                      >
+                        {page}
+                      </PaginationLink>
+                    </PaginationItem>
+                  );
+                })}
+                
+                <PaginationItem>
+                  <PaginationNext 
+                    onClick={() => setCurrentPage(prev => Math.min(totalPages, prev + 1))}
+                    className={currentPage === totalPages ? 'pointer-events-none opacity-50' : 'cursor-pointer'}
+                  />
+                </PaginationItem>
+              </PaginationContent>
+            </Pagination>
+          )}
         </div>
-      )}
+      );
+      })()}
     </div>
   );
 };

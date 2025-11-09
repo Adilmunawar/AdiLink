@@ -1,1 +1,7 @@
 project_id = "olkbhjyfpdvcovtuekzt"
+
+[functions.match-candidates]
+verify_jwt = true
+
+[functions.parse-resume]
+verify_jwt = true

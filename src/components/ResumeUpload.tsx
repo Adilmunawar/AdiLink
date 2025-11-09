@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { supabase } from '@/integrations/supabase/client';
 import { Upload, FileText, CheckCircle, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
@@ -21,18 +22,15 @@ export const ResumeUpload = () => {
         formData.append('file', file);
         formData.append('fileName', file.name);
 
-        const response = await fetch('https://olkbhjyfpdvcovtuekzt.supabase.co/functions/v1/parse-resume', {
-          method: 'POST',
+        const { data, error } = await supabase.functions.invoke('parse-resume', {
           body: formData,
         });
 
-        if (!response.ok) {
-          const error = await response.json();
-          throw new Error(error.error || 'Failed to upload resume');
+        if (error) {
+          throw new Error(error.message || 'Failed to upload resume');
         }
 
-        const result = await response.json();
-        console.log('Resume uploaded:', result);
+        console.log('Resume uploaded:', data);
         setUploadedCount(prev => prev + 1);
       }
 
