@@ -43,6 +43,92 @@ export type Database = {
           },
         ]
       }
+      candidate_matches: {
+        Row: {
+          candidate_email: string | null
+          candidate_id: string
+          candidate_location: string | null
+          candidate_name: string
+          candidate_phone: string | null
+          company: string | null
+          created_at: string
+          experience_years: number | null
+          id: string
+          job_role: string | null
+          key_strengths: string[]
+          match_score: number
+          potential_concerns: string[]
+          reasoning: string
+          search_id: string
+        }
+        Insert: {
+          candidate_email?: string | null
+          candidate_id: string
+          candidate_location?: string | null
+          candidate_name: string
+          candidate_phone?: string | null
+          company?: string | null
+          created_at?: string
+          experience_years?: number | null
+          id?: string
+          job_role?: string | null
+          key_strengths?: string[]
+          match_score: number
+          potential_concerns?: string[]
+          reasoning: string
+          search_id: string
+        }
+        Update: {
+          candidate_email?: string | null
+          candidate_id?: string
+          candidate_location?: string | null
+          candidate_name?: string
+          candidate_phone?: string | null
+          company?: string | null
+          created_at?: string
+          experience_years?: number | null
+          id?: string
+          job_role?: string | null
+          key_strengths?: string[]
+          match_score?: number
+          potential_concerns?: string[]
+          reasoning?: string
+          search_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "candidate_matches_search_id_fkey"
+            columns: ["search_id"]
+            isOneToOne: false
+            referencedRelation: "job_searches"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      job_searches: {
+        Row: {
+          created_at: string
+          id: string
+          job_description: string
+          total_candidates: number
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          job_description: string
+          total_candidates?: number
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          job_description?: string
+          total_candidates?: number
+          user_id?: string
+        }
+        Relationships: []
+      }
       profiles: {
         Row: {
           created_at: string | null

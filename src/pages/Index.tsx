@@ -1,10 +1,10 @@
-import { useEffect } from 'react';
+import React, { useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ResumeUpload } from '@/components/ResumeUpload';
 import { CandidateHunting } from '@/components/CandidateHunting';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Button } from '@/components/ui/button';
-import { Users, Upload, LogOut } from 'lucide-react';
+import { Users, Upload, LogOut, Bookmark, History } from 'lucide-react';
 import talentProLogo from '@/assets/talent-pro-logo.png';
 import { useAuth } from '@/hooks/useAuth';
 import { Loader2 } from 'lucide-react';
@@ -55,17 +55,39 @@ const Index = () => {
           <p className="text-xl text-muted-foreground max-w-2xl mx-auto leading-relaxed">
             AI-Powered Recruitment Platform - Upload resumes, store candidate data, and find the perfect match with intelligent ranking
           </p>
-          <div className="flex items-center justify-center gap-2 text-muted-foreground">
-            <span>Welcome, {user.email}</span>
-            <Button 
-              variant="ghost" 
-              size="sm" 
-              onClick={signOut}
-              className="gap-2"
-            >
-              <LogOut className="h-4 w-4" />
-              Sign Out
-            </Button>
+          <div className="flex flex-col items-center justify-center gap-4">
+            <div className="flex items-center gap-2 text-muted-foreground">
+              <span>Welcome, {user.email}</span>
+              <Button 
+                variant="ghost" 
+                size="sm" 
+                onClick={signOut}
+                className="gap-2"
+              >
+                <LogOut className="h-4 w-4" />
+                Sign Out
+              </Button>
+            </div>
+            <div className="flex items-center gap-3">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => navigate('/bookmarks')}
+                className="gap-2 bg-card/50 backdrop-blur-sm hover:bg-primary/10 border-primary/30"
+              >
+                <Bookmark className="h-4 w-4" />
+                My Bookmarks
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => navigate('/history')}
+                className="gap-2 bg-card/50 backdrop-blur-sm hover:bg-primary/10 border-primary/30"
+              >
+                <History className="h-4 w-4" />
+                Search History
+              </Button>
+            </div>
           </div>
         </header>
 

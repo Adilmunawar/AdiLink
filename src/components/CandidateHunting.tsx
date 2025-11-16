@@ -1,4 +1,5 @@
-import { useState, useEffect } from 'react';
+import React, { useState, useEffect } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { supabase } from '@/integrations/supabase/client';
 import { Search, Sparkles, Award, MapPin, Download, X, Bookmark } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -32,6 +33,7 @@ interface CandidateMatch {
 }
 
 export const CandidateHunting = () => {
+  const [searchParams] = useSearchParams();
   const [jobDescription, setJobDescription] = useState('');
   const [searching, setSearching] = useState(false);
   const [matches, setMatches] = useState<CandidateMatch[]>([]);
@@ -39,14 +41,21 @@ export const CandidateHunting = () => {
   const [currentPage, setCurrentPage] = useState(1);
   const [bookmarkedIds, setBookmarkedIds] = useState<Set<string>>(new Set());
   const [showBookmarkedOnly, setShowBookmarkedOnly] = useState(false);
+  const [currentSearchId, setCurrentSearchId] = useState<string | null>(null);
   const { toast } = useToast();
   
   const itemsPerPage = 10;
 
-  // Fetch bookmarks on mount
+  // Fetch bookmarks and load search based on URL parameter or last search
   useEffect(() => {
     fetchBookmarks();
-  }, []);
+    const searchId = searchParams.get('search');
+    if (searchId) {
+      loadSpecificSearch(searchId);
+    } else {
+      loadLastSearch();
+    }
+  }, [searchParams]);
 
   const fetchBookmarks = async () => {
     try {
@@ -62,6 +71,117 @@ export const CandidateHunting = () => {
       setBookmarkedIds(new Set(data?.map(b => b.candidate_id) || []));
     } catch (error) {
       console.error('Error fetching bookmarks:', error);
+    }
+  };
+
+  const loadSpecificSearch = async (searchId: string) => {
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
+
+      // Get the specific search
+      const { data: searchData, error: searchError } = await supabase
+        .from('job_searches')
+        .select('*')
+        .eq('id', searchId)
+        .maybeSingle();
+
+      if (searchError) throw searchError;
+      if (!searchData) {
+        toast({
+          title: 'Search Not Found',
+          description: 'The requested search could not be found',
+          variant: 'destructive',
+        });
+        return;
+      }
+
+      // Load the candidates for this search
+      const { data: candidatesData, error: candidatesError } = await supabase
+        .from('candidate_matches')
+        .select('*')
+        .eq('search_id', searchData.id)
+        .order('match_score', { ascending: false });
+
+      if (candidatesError) throw candidatesError;
+
+      // Convert to CandidateMatch format
+      const formattedMatches: CandidateMatch[] = candidatesData.map((c) => ({
+        id: c.candidate_id,
+        full_name: c.candidate_name,
+        email: c.candidate_email,
+        phone_number: c.candidate_phone,
+        job_title: c.job_role,
+        location: c.candidate_location,
+        years_of_experience: c.experience_years,
+        matchScore: c.match_score,
+        reasoning: c.reasoning,
+        strengths: c.key_strengths || [],
+        concerns: c.potential_concerns || [],
+      }));
+
+      setJobDescription(searchData.job_description);
+      setMatches(formattedMatches);
+      setTotalCandidates(searchData.total_candidates);
+      setCurrentSearchId(searchData.id);
+      setCurrentPage(1);
+    } catch (error) {
+      console.error('Error loading specific search:', error);
+      toast({
+        title: 'Error',
+        description: 'Failed to load search results',
+        variant: 'destructive',
+      });
+    }
+  };
+
+  const loadLastSearch = async () => {
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
+
+      // Get the most recent search
+      const { data: searchData, error: searchError } = await supabase
+        .from('job_searches')
+        .select('*')
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (searchError) throw searchError;
+      if (!searchData) return;
+
+      // Load the candidates for this search
+      const { data: candidatesData, error: candidatesError } = await supabase
+        .from('candidate_matches')
+        .select('*')
+        .eq('search_id', searchData.id)
+        .order('match_score', { ascending: false });
+
+      if (candidatesError) throw candidatesError;
+
+      // Convert to CandidateMatch format
+      const formattedMatches: CandidateMatch[] = candidatesData.map((c) => ({
+        id: c.candidate_id,
+        full_name: c.candidate_name,
+        email: c.candidate_email,
+        phone_number: c.candidate_phone,
+        job_title: c.job_role,
+        location: c.candidate_location,
+        years_of_experience: c.experience_years,
+        matchScore: c.match_score,
+        reasoning: c.reasoning,
+        strengths: c.key_strengths || [],
+        concerns: c.potential_concerns || [],
+      }));
+
+      setJobDescription(searchData.job_description);
+      setMatches(formattedMatches);
+      setTotalCandidates(searchData.total_candidates);
+      setCurrentSearchId(searchData.id);
+      setCurrentPage(1);
+    } catch (error) {
+      console.error('Error loading last search:', error);
     }
   };
 
@@ -205,6 +325,7 @@ export const CandidateHunting = () => {
     setCurrentPage(1);
     setJobDescription('');
     setShowBookmarkedOnly(false);
+    setCurrentSearchId(null);
     toast({
       title: 'Results Cleared',
       description: 'Ready for a new search',
@@ -224,6 +345,9 @@ export const CandidateHunting = () => {
     setSearching(true);
 
     try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) throw new Error('User not authenticated');
+
       const { data, error } = await supabase.functions.invoke('match-candidates', {
         body: { jobDescription },
       });
@@ -232,13 +356,70 @@ export const CandidateHunting = () => {
         throw new Error(error.message || 'Failed to match candidates');
       }
 
-      setMatches(data.matches || []);
-      setTotalCandidates(data.total || 0);
-      setCurrentPage(1); // Reset to first page on new search
+      const matches = data.matches || [];
+      const total = data.total || 0;
+
+      console.log('Received matches from edge function:', matches.length);
+      console.log('Sample match structure:', matches[0]);
+
+      // Save search to database
+      const { data: searchData, error: searchError } = await supabase
+        .from('job_searches')
+        .insert({
+          user_id: user.id,
+          job_description: jobDescription,
+          total_candidates: total,
+        })
+        .select()
+        .single();
+
+      if (searchError) {
+        console.error('Error saving search:', searchError);
+        throw searchError;
+      }
+
+      console.log('Search saved with ID:', searchData.id);
+
+      // Save all candidate matches
+      const candidateRecords = matches.map((match: CandidateMatch) => ({
+        search_id: searchData.id,
+        candidate_id: match.id,
+        candidate_name: match.full_name,
+        candidate_email: match.email,
+        candidate_phone: match.phone_number,
+        candidate_location: match.location,
+        job_role: match.job_title,
+        experience_years: match.years_of_experience,
+        match_score: match.matchScore,
+        reasoning: match.reasoning,
+        key_strengths: match.strengths || [],
+        potential_concerns: match.concerns || [],
+      }));
+
+      console.log('Saving candidate records:', candidateRecords.length);
+      console.log('Sample candidate record:', candidateRecords[0]);
+
+      if (candidateRecords.length > 0) {
+        const { error: matchesError } = await supabase
+          .from('candidate_matches')
+          .insert(candidateRecords);
+
+        if (matchesError) {
+          console.error('Error saving candidate matches:', matchesError);
+          throw matchesError;
+        }
+        
+        console.log('Successfully saved all candidate matches');
+      }
+
+      setMatches(matches);
+      setTotalCandidates(total);
+      setCurrentPage(1);
+      setCurrentSearchId(searchData.id);
 
       toast({
         title: 'Search Complete!',
-        description: `Ranked ${data.matches?.length || 0} candidates from ${data.total || 0} total resumes`,
+        description: `Ranked ${matches.length} candidates from ${total} total resumes`,
       });
     } catch (error) {
       console.error('Search error:', error);
