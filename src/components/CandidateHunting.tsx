@@ -42,6 +42,8 @@ export const CandidateHunting = () => {
   const [bookmarkedIds, setBookmarkedIds] = useState<Set<string>>(new Set());
   const [showBookmarkedOnly, setShowBookmarkedOnly] = useState(false);
   const [currentSearchId, setCurrentSearchId] = useState<string | null>(null);
+  const [searchProgress, setSearchProgress] = useState(0);
+  const [searchStatus, setSearchStatus] = useState('');
   const { toast } = useToast();
   
   const itemsPerPage = 10;
@@ -343,14 +345,31 @@ export const CandidateHunting = () => {
     }
 
     setSearching(true);
+    setSearchProgress(0);
+    setSearchStatus('Initializing search...');
 
     try {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) throw new Error('User not authenticated');
 
+      setSearchStatus('Analyzing candidates with AI...');
+      setSearchProgress(10);
+
+      // Simulate progress during the async operation
+      const progressInterval = setInterval(() => {
+        setSearchProgress(prev => {
+          if (prev < 85) return prev + 5;
+          return prev;
+        });
+      }, 1000);
+
       const { data, error } = await supabase.functions.invoke('match-candidates', {
         body: { jobDescription },
       });
+
+      clearInterval(progressInterval);
+      setSearchProgress(90);
+      setSearchStatus('Processing results...');
 
       if (error) {
         throw new Error(error.message || 'Failed to match candidates');
@@ -416,6 +435,8 @@ export const CandidateHunting = () => {
       setTotalCandidates(total);
       setCurrentPage(1);
       setCurrentSearchId(searchData.id);
+      setSearchProgress(100);
+      setSearchStatus('Search complete!');
 
       toast({
         title: 'Search Complete!',
@@ -430,6 +451,10 @@ export const CandidateHunting = () => {
       });
     } finally {
       setSearching(false);
+      setTimeout(() => {
+        setSearchProgress(0);
+        setSearchStatus('');
+      }, 2000);
     }
   };
 
@@ -471,6 +496,21 @@ export const CandidateHunting = () => {
               </>
             )}
           </Button>
+
+          {searching && searchProgress > 0 && (
+            <div className="space-y-2 animate-in fade-in duration-300">
+              <div className="flex items-center justify-between text-sm">
+                <span className="text-muted-foreground font-medium">{searchStatus}</span>
+                <span className="text-primary font-bold">{searchProgress}%</span>
+              </div>
+              <div className="w-full h-3 bg-secondary/30 rounded-full overflow-hidden backdrop-blur-sm">
+                <div 
+                  className="h-full bg-gradient-to-r from-primary via-secondary to-primary bg-[length:200%_100%] animate-[shimmer_2s_infinite] transition-all duration-500 ease-out rounded-full shadow-[0_0_10px_var(--primary)]"
+                  style={{ width: `${searchProgress}%` }}
+                />
+              </div>
+            </div>
+          )}
         </div>
       </Card>
 

@@ -177,7 +177,7 @@ serve(async (req) => {
                 { inlineData: { data: base64Data, mimeType: file.type || `application/${fileExt}` } }
               ]
             }],
-            generationConfig: { temperature: 0.1, maxOutputTokens: 8192 }
+            generationConfig: { temperature: 0.1, maxOutputTokens: 8192, responseMimeType: "text/plain" }
           })
         });
 

@@ -61,43 +61,52 @@ serve(async (req) => {
 
     console.log(`Processing ${profiles.length} candidates in batches...`);
 
-    // Process in batches of 50 candidates
-    const BATCH_SIZE = 50;
-    const BATCH_DELAY_MS = 5000; // 5 seconds between batches to respect rate limits
+    // Process in batches of 10 candidates with parallel processing
+    const BATCH_SIZE = 10;
+    const PARALLEL_BATCHES = 3; // Process 3 batches in parallel
     const allRankedCandidates: any[] = [];
     
-    for (let i = 0; i < profiles.length; i += BATCH_SIZE) {
-      const batchProfiles = profiles.slice(i, Math.min(i + BATCH_SIZE, profiles.length));
-      const batchNum = Math.floor(i / BATCH_SIZE) + 1;
-      const totalBatches = Math.ceil(profiles.length / BATCH_SIZE);
+    // Process batches in parallel (3 at a time) for faster execution
+    const totalBatches = Math.ceil(profiles.length / BATCH_SIZE);
+    
+    for (let batchStart = 0; batchStart < profiles.length; batchStart += BATCH_SIZE * PARALLEL_BATCHES) {
+      const parallelBatches = [];
       
-      console.log(`Processing batch ${batchNum}/${totalBatches} (${batchProfiles.length} candidates)...`);
-      
-      // Prepare candidate summaries
-      const candidateSummaries = batchProfiles.map((profile, index) => {
-        const text = (profile.resume_text || '').toString();
-        const snippet = text.length > 1000 ? text.slice(0, 1000) + '...' : text;
-        return {
-          index: i + index,
-          resume: snippet
-        };
-      });
+      for (let j = 0; j < PARALLEL_BATCHES; j++) {
+        const i = batchStart + (j * BATCH_SIZE);
+        if (i >= profiles.length) break;
+        
+        const batchProfiles = profiles.slice(i, Math.min(i + BATCH_SIZE, profiles.length));
+        const batchNum = Math.floor(i / BATCH_SIZE) + 1;
+        
+        parallelBatches.push((async () => {
+          console.log(`Processing batch ${batchNum}/${totalBatches} (${batchProfiles.length} candidates)...`);
+          
+          // Prepare candidate summaries with larger snippets for better matching
+          const candidateSummaries = batchProfiles.map((profile, index) => {
+            const text = (profile.resume_text || '').toString();
+            const snippet = text.length > 1500 ? text.slice(0, 1500) + '...' : text;
+            return {
+              index: i + index,
+              resume: snippet
+            };
+          });
 
-      // Process batch with Gemini Flash
-      let batchRanked: any[] = [];
-      const maxRetries = 3;
-      
-      for (let attempt = 0; attempt < maxRetries; attempt++) {
-        try {
-          const response = await fetch(
-            `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key=${GEMINI_API_KEY}`,
-            {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                contents: [{
-                  parts: [{
-                    text: `You are an expert recruiter. Analyze these candidates against the job description and return ONLY a valid JSON object with a "candidates" array.
+          // Process batch with Gemini Flash
+          let batchRanked: any[] = [];
+          const maxRetries = 3;
+          
+          for (let attempt = 0; attempt < maxRetries; attempt++) {
+            try {
+              const response = await fetch(
+                `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`,
+                {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                    contents: [{
+                      parts: [{
+                        text: `You are an expert recruiter. Analyze these candidates against the job description and return ONLY a valid JSON object with a "candidates" array.
 
 Job Description:
 ${jobDescription}
@@ -123,99 +132,100 @@ Return a JSON object with this structure:
     }
   ]
 }`
-                  }]
-                }],
-                generationConfig: {
-                  temperature: 0.3,
-                  maxOutputTokens: 4000,
-                  responseMimeType: "application/json"
+                      }]
+                    }],
+                    generationConfig: {
+                      temperature: 0.1,
+                      maxOutputTokens: 4000,
+                      responseMimeType: "application/json"
+                    }
+                  })
                 }
-              })
-            }
-          );
+              );
 
-          if (!response.ok) {
-            const errorText = await response.text();
-            console.error(`Gemini API error (attempt ${attempt + 1}):`, response.status, errorText);
-            
-            if (response.status === 429 && attempt < maxRetries - 1) {
-              let retryDelay = 60000; // Default 60 second wait
-              try {
-                const errorData = JSON.parse(errorText);
-                if (errorData.error?.details?.[0]?.metadata?.retryDelay) {
-                  retryDelay = parseInt(errorData.error.details[0].metadata.retryDelay.replace('s', '')) * 1000;
+              if (!response.ok) {
+                const errorText = await response.text();
+                console.error(`Gemini API error (attempt ${attempt + 1}):`, response.status, errorText);
+                
+                if (response.status === 429 && attempt < maxRetries - 1) {
+                  let retryDelay = 60000;
+                  try {
+                    const errorData = JSON.parse(errorText);
+                    if (errorData.error?.details?.[0]?.metadata?.retryDelay) {
+                      retryDelay = parseInt(errorData.error.details[0].metadata.retryDelay.replace('s', '')) * 1000;
+                    }
+                  } catch (e) {
+                    console.log('Could not parse retry delay, using default');
+                  }
+                  console.log(`Rate limited, waiting ${retryDelay}ms...`);
+                  await new Promise(resolve => setTimeout(resolve, retryDelay));
+                  continue;
                 }
-              } catch (e) {
-                console.log('Could not parse retry delay, using default');
+                
+                throw new Error(`Gemini API error: ${response.status}`);
               }
-              console.log(`Rate limited, waiting ${retryDelay}ms...`);
-              await new Promise(resolve => setTimeout(resolve, retryDelay));
-              continue;
-            }
-            
-            throw new Error(`Gemini API error: ${response.status}`);
-          }
 
-          const data = await response.json();
-          const content = data.candidates[0].content.parts[0].text;
-          const parsed = JSON.parse(content);
-          
-          const candidates = parsed.candidates || [];
-          
-          batchRanked = candidates.map((candidate: any) => ({
-            candidateIndex: candidate.candidateIndex,
-            fullName: candidate.fullName || 'Not extracted',
-            email: candidate.email || null,
-            phone: candidate.phone || null,
-            location: candidate.location || null,
-            jobTitle: candidate.jobTitle || null,
-            yearsOfExperience: candidate.yearsOfExperience || null,
-            matchScore: candidate.matchScore || 50,
-            reasoning: candidate.reasoning || 'Analyzed',
-            strengths: candidate.strengths || [],
-            concerns: candidate.concerns || []
-          }));
-          
-          console.log(`Successfully processed batch ${batchNum} (${batchRanked.length} candidates)`);
-          break;
-          
-        } catch (error) {
-          console.error(`Batch ${batchNum} attempt ${attempt + 1} failed:`, error);
-          
-          if (attempt === maxRetries - 1) {
-            console.log(`Creating fallback results for batch ${batchNum}`);
-            batchRanked = candidateSummaries.map(c => ({
-              candidateIndex: c.index,
-              fullName: `Candidate ${c.index + 1}`,
-              email: null,
-              phone: null,
-              location: null,
-              jobTitle: null,
-              yearsOfExperience: null,
-              matchScore: 0,
-              reasoning: 'Analysis failed - manual review needed',
-              strengths: [],
-              concerns: ['Automated analysis unavailable']
-            }));
-          } else {
-            await new Promise(resolve => setTimeout(resolve, Math.pow(2, attempt + 1) * 1000));
+              const data = await response.json();
+              const content = data.candidates[0].content.parts[0].text;
+              const parsed = JSON.parse(content);
+              
+              const candidates = parsed.candidates || [];
+              
+              batchRanked = candidates.map((candidate: any) => ({
+                candidateIndex: candidate.candidateIndex,
+                fullName: candidate.fullName || 'Not extracted',
+                email: candidate.email || null,
+                phone: candidate.phone || null,
+                location: candidate.location || null,
+                jobTitle: candidate.jobTitle || null,
+                yearsOfExperience: candidate.yearsOfExperience || null,
+                matchScore: candidate.matchScore || 50,
+                reasoning: candidate.reasoning || 'Analyzed',
+                strengths: candidate.strengths || [],
+                concerns: candidate.concerns || []
+              }));
+              
+              console.log(`Successfully processed batch ${batchNum} (${batchRanked.length} candidates)`);
+              break;
+              
+            } catch (error) {
+              console.error(`Batch ${batchNum} attempt ${attempt + 1} failed:`, error);
+              
+              if (attempt === maxRetries - 1) {
+                console.log(`Creating fallback results for batch ${batchNum}`);
+                batchRanked = candidateSummaries.map(c => ({
+                  candidateIndex: c.index,
+                  fullName: `Candidate ${c.index + 1}`,
+                  email: null,
+                  phone: null,
+                  location: null,
+                  jobTitle: null,
+                  yearsOfExperience: null,
+                  matchScore: 0,
+                  reasoning: 'Analysis failed - manual review needed',
+                  strengths: [],
+                  concerns: ['Automated analysis unavailable']
+                }));
+              } else {
+                await new Promise(resolve => setTimeout(resolve, Math.pow(2, attempt + 1) * 1000));
+              }
+            }
           }
-        }
+          
+          return batchRanked;
+        })());
       }
       
-      allRankedCandidates.push(...batchRanked);
-      
-      if (i + BATCH_SIZE < profiles.length) {
-        await new Promise(resolve => setTimeout(resolve, BATCH_DELAY_MS));
-      }
+      const batchResults = await Promise.all(parallelBatches);
+      batchResults.forEach(result => allRankedCandidates.push(...result));
     }
 
     console.log(`All batches processed. Total candidates: ${allRankedCandidates.length}`);
 
     allRankedCandidates.sort((a, b) => (b.matchScore || 0) - (a.matchScore || 0));
 
-    // Merge with profile data and update database
-    const matches = await Promise.all(allRankedCandidates.map(async (ranked: any) => {
+    // Merge with profile data and prepare bulk database updates
+    const matches = allRankedCandidates.map((ranked: any) => {
       const profile = profiles[ranked.candidateIndex];
       
       if (!profile) {
@@ -224,24 +234,6 @@ Return a JSON object with this structure:
       }
       
       const isFallback = ranked.reasoning === 'Analysis failed - manual review needed';
-      
-      if (!isFallback && ranked.fullName && ranked.fullName !== 'Not extracted') {
-        const updateData: any = {};
-        
-        if (ranked.fullName) updateData.full_name = ranked.fullName;
-        if (ranked.email) updateData.email = ranked.email;
-        if (ranked.phone) updateData.phone_number = ranked.phone;
-        if (ranked.location) updateData.location = ranked.location;
-        if (ranked.jobTitle) updateData.job_title = ranked.jobTitle;
-        if (ranked.yearsOfExperience) updateData.years_of_experience = ranked.yearsOfExperience;
-        
-        if (Object.keys(updateData).length > 0) {
-          await supabaseClient
-            .from('profiles')
-            .update(updateData)
-            .eq('id', profile.id);
-        }
-      }
       
       return {
         id: profile.id,
@@ -258,19 +250,44 @@ Return a JSON object with this structure:
         reasoning: ranked.reasoning,
         strengths: ranked.strengths || [],
         concerns: ranked.concerns || [],
-        isFallback
+        isFallback,
+        shouldUpdate: !isFallback && ranked.fullName && ranked.fullName !== 'Not extracted'
       };
-    }));
+    }).filter(m => m !== null);
 
-    const validMatches = matches.filter(m => m !== null);
-    const fallbackCount = validMatches.filter(m => m.isFallback).length;
-    const successCount = validMatches.length - fallbackCount;
+    // Bulk update profiles (optimized with Promise.allSettled)
+    const updatePromises = matches
+      .filter(m => m.shouldUpdate)
+      .map(m => {
+        const updateData: any = {};
+        if (m.full_name) updateData.full_name = m.full_name;
+        if (m.email) updateData.email = m.email;
+        if (m.phone_number) updateData.phone_number = m.phone_number;
+        if (m.location) updateData.location = m.location;
+        if (m.job_title) updateData.job_title = m.job_title;
+        if (m.years_of_experience) updateData.years_of_experience = m.years_of_experience;
+        
+        if (Object.keys(updateData).length > 0) {
+          return supabaseClient
+            .from('profiles')
+            .update(updateData)
+            .eq('id', m.id);
+        }
+        return null;
+      })
+      .filter(p => p !== null);
+    
+    await Promise.allSettled(updatePromises);
+
+    const validMatches = matches.filter(m => !m.isFallback);
+    const fallbackCount = matches.filter(m => m.isFallback).length;
+    const successCount = validMatches.length;
     
     console.log(`Successfully matched ${successCount} candidates, ${fallbackCount} fallback`);
 
     return new Response(
       JSON.stringify({ 
-        matches: validMatches.filter(m => !m.isFallback),
+        matches: validMatches,
         total: profiles.length,
         message: `Successfully matched ${successCount} candidates`
       }),
