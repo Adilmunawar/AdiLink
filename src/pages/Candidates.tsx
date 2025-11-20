@@ -5,6 +5,8 @@ import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Checkbox } from '@/components/ui/checkbox';
+import { Label } from '@/components/ui/label';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -16,9 +18,10 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
 import { useToast } from '@/hooks/use-toast';
-import { ArrowLeft, FileText, Mail, Phone, MapPin, Briefcase, ExternalLink, Trash2 } from 'lucide-react';
+import { ArrowLeft, FileText, Mail, Phone, MapPin, Briefcase, ExternalLink, Trash2, Download, FileSpreadsheet } from 'lucide-react';
 import { Tables } from '@/integrations/supabase/types';
 import Footer from '@/components/Footer';
+import * as XLSX from 'xlsx';
 
 type Profile = Tables<'profiles'>;
 
@@ -36,6 +39,14 @@ export default function Candidates() {
   const [duplicateIds, setDuplicateIds] = useState<string[]>([]);
   const [checkingDuplicates, setCheckingDuplicates] = useState(false);
   const [deletingDuplicates, setDeletingDuplicates] = useState(false);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [selectedCandidates, setSelectedCandidates] = useState<Set<string>>(new Set());
+  const [showBulkDeleteDialog, setShowBulkDeleteDialog] = useState(false);
+  const [bulkDeleting, setBulkDeleting] = useState(false);
+  const [locationFilter, setLocationFilter] = useState<string>('all');
+  const [experienceFilter, setExperienceFilter] = useState<string>('all');
+  const [locations, setLocations] = useState<string[]>([]);
+  const ITEMS_PER_PAGE = 10;
 
   useEffect(() => {
     fetchProfiles();
@@ -43,7 +54,12 @@ export default function Candidates() {
 
   useEffect(() => {
     filterProfiles();
-  }, [profiles, searchTerm, selectedJobTitle]);
+  }, [profiles, searchTerm, selectedJobTitle, locationFilter, experienceFilter]);
+
+  useEffect(() => {
+    setCurrentPage(1);
+    setSelectedCandidates(new Set());
+  }, [searchTerm, selectedJobTitle, locationFilter, experienceFilter]);
 
   const fetchProfiles = async () => {
     try {
@@ -61,6 +77,12 @@ export default function Candidates() {
         new Set(data?.map(p => p.job_title).filter(Boolean) as string[])
       );
       setJobTitles(uniqueTitles);
+      
+      // Extract unique locations for filter
+      const uniqueLocations = Array.from(
+        new Set(data?.map(p => p.location).filter(Boolean) as string[])
+      );
+      setLocations(uniqueLocations);
     } catch (error) {
       toast({
         title: 'Error',
@@ -75,18 +97,40 @@ export default function Candidates() {
   const filterProfiles = () => {
     let filtered = profiles;
 
-    // Filter by search term
+    // Filter by search term (searches across multiple fields)
     if (searchTerm) {
+      const searchLower = searchTerm.toLowerCase();
       filtered = filtered.filter(profile =>
-        profile.full_name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        profile.email?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        profile.phone_number?.toLowerCase().includes(searchTerm.toLowerCase())
+        profile.full_name?.toLowerCase().includes(searchLower) ||
+        profile.email?.toLowerCase().includes(searchLower) ||
+        profile.phone_number?.toLowerCase().includes(searchLower) ||
+        profile.job_title?.toLowerCase().includes(searchLower) ||
+        profile.location?.toLowerCase().includes(searchLower) ||
+        profile.sector?.toLowerCase().includes(searchLower) ||
+        profile.skills?.some(skill => skill.toLowerCase().includes(searchLower))
       );
     }
 
     // Filter by job title
     if (selectedJobTitle !== 'all') {
       filtered = filtered.filter(profile => profile.job_title === selectedJobTitle);
+    }
+
+    // Filter by location
+    if (locationFilter !== 'all') {
+      filtered = filtered.filter(profile => profile.location === locationFilter);
+    }
+
+    // Filter by experience
+    if (experienceFilter !== 'all') {
+      filtered = filtered.filter(profile => {
+        const years = profile.years_of_experience || 0;
+        if (experienceFilter === '0-2') return years <= 2;
+        if (experienceFilter === '3-5') return years >= 3 && years <= 5;
+        if (experienceFilter === '6-10') return years >= 6 && years <= 10;
+        if (experienceFilter === '10+') return years > 10;
+        return true;
+      });
     }
 
     setFilteredProfiles(filtered);
@@ -163,7 +207,6 @@ export default function Candidates() {
         description: `Deleted ${duplicateCount} duplicate profile(s)`,
       });
 
-      // Refresh the list
       await fetchProfiles();
       setShowDeleteDialog(false);
       setDuplicateIds([]);
@@ -177,6 +220,121 @@ export default function Candidates() {
     } finally {
       setDeletingDuplicates(false);
     }
+  };
+
+  const handleSelectAll = (checked: boolean) => {
+    if (checked) {
+      const currentPageIds = filteredProfiles
+        .slice((currentPage - 1) * ITEMS_PER_PAGE, currentPage * ITEMS_PER_PAGE)
+        .map(p => p.id);
+      setSelectedCandidates(new Set(currentPageIds));
+    } else {
+      setSelectedCandidates(new Set());
+    }
+  };
+
+  const handleSelectCandidate = (id: string, checked: boolean) => {
+    const newSelected = new Set(selectedCandidates);
+    if (checked) {
+      newSelected.add(id);
+    } else {
+      newSelected.delete(id);
+    }
+    setSelectedCandidates(newSelected);
+  };
+
+  const handleBulkDelete = async () => {
+    setBulkDeleting(true);
+    try {
+      const { error } = await supabase
+        .from('profiles')
+        .delete()
+        .in('id', Array.from(selectedCandidates));
+
+      if (error) throw error;
+
+      toast({
+        title: 'Success',
+        description: `Deleted ${selectedCandidates.size} candidate(s)`,
+      });
+
+      await fetchProfiles();
+      setShowBulkDeleteDialog(false);
+      setSelectedCandidates(new Set());
+    } catch (error) {
+      toast({
+        title: 'Error',
+        description: 'Failed to delete candidates',
+        variant: 'destructive',
+      });
+    } finally {
+      setBulkDeleting(false);
+    }
+  };
+
+  const exportToCSV = () => {
+    const csvData = filteredProfiles.map(profile => ({
+      'Name': profile.full_name || '',
+      'Email': profile.email || '',
+      'Phone': profile.phone_number || '',
+      'Location': profile.location || '',
+      'Job Title': profile.job_title || '',
+      'Experience (Years)': profile.years_of_experience || 0,
+      'Sector': profile.sector || '',
+      'Skills': profile.skills?.join(', ') || '',
+      'Education': profile.education || '',
+    }));
+
+    const csv = [
+      Object.keys(csvData[0]).join(','),
+      ...csvData.map(row => Object.values(row).map(val => `"${val}"`).join(','))
+    ].join('\n');
+
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `candidates_${new Date().toISOString().split('T')[0]}.csv`;
+    a.click();
+    window.URL.revokeObjectURL(url);
+
+    toast({
+      title: 'Export Successful',
+      description: `Exported ${filteredProfiles.length} candidates to CSV`,
+    });
+  };
+
+  const exportToExcel = () => {
+    const excelData = filteredProfiles.map(profile => ({
+      'Name': profile.full_name || '',
+      'Email': profile.email || '',
+      'Phone': profile.phone_number || '',
+      'Location': profile.location || '',
+      'Job Title': profile.job_title || '',
+      'Experience (Years)': profile.years_of_experience || 0,
+      'Sector': profile.sector || '',
+      'Skills': profile.skills?.join(', ') || '',
+      'Education': profile.education || '',
+      'Resume URL': profile.resume_file_url || '',
+    }));
+
+    const ws = XLSX.utils.json_to_sheet(excelData);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Candidates');
+    
+    // Auto-size columns
+    const maxWidth = 50;
+    const colWidths = Object.keys(excelData[0] || {}).map(key => ({
+      wch: Math.min(maxWidth, Math.max(key.length, ...excelData.map(row => String(row[key as keyof typeof row]).length)))
+    }));
+    ws['!cols'] = colWidths;
+
+    XLSX.writeFile(wb, `candidates_${new Date().toISOString().split('T')[0]}.xlsx`);
+
+    toast({
+      title: 'Export Successful',
+      description: `Exported ${filteredProfiles.length} candidates to Excel`,
+    });
   };
 
   return (
@@ -194,44 +352,150 @@ export default function Candidates() {
             </Button>
             <h1 className="text-4xl font-bold text-foreground">All Candidates</h1>
           </div>
-          <Button
-            variant="destructive"
-            onClick={findDuplicates}
-            disabled={checkingDuplicates || profiles.length === 0}
-            className="gap-2"
-          >
-            <Trash2 className="h-4 w-4" />
-            {checkingDuplicates ? 'Checking...' : 'Delete Duplicates'}
-          </Button>
+          <div className="flex flex-wrap gap-2">
+            {selectedCandidates.size > 0 && (
+              <Button
+                variant="destructive"
+                onClick={() => setShowBulkDeleteDialog(true)}
+                className="gap-2"
+              >
+                <Trash2 className="h-4 w-4" />
+                Delete Selected ({selectedCandidates.size})
+              </Button>
+            )}
+            <Button
+              variant="outline"
+              onClick={exportToCSV}
+              disabled={filteredProfiles.length === 0}
+              className="gap-2"
+            >
+              <Download className="h-4 w-4" />
+              Export CSV
+            </Button>
+            <Button
+              variant="outline"
+              onClick={exportToExcel}
+              disabled={filteredProfiles.length === 0}
+              className="gap-2"
+            >
+              <FileSpreadsheet className="h-4 w-4" />
+              Export Excel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={findDuplicates}
+              disabled={checkingDuplicates || profiles.length === 0}
+              className="gap-2"
+            >
+              <Trash2 className="h-4 w-4" />
+              {checkingDuplicates ? 'Checking...' : 'Delete Duplicates'}
+            </Button>
+          </div>
         </div>
 
-        {/* Filters */}
+        {/* Advanced Filters */}
         <Card className="p-6 mb-8 bg-card/50 backdrop-blur-sm">
-          <div className="flex flex-col md:flex-row gap-4">
-            <div className="flex-1">
-              <Input
-                placeholder="Search by name, email, or phone..."
-                value={searchTerm}
-                onChange={(e) => setSearchTerm(e.target.value)}
-                className="w-full"
-              />
+          <div className="space-y-4">
+            <div className="flex flex-col md:flex-row gap-4">
+              <div className="flex-1">
+                <Label htmlFor="search" className="text-sm font-medium mb-2 block">
+                  Search Candidates
+                </Label>
+                <Input
+                  id="search"
+                  placeholder="Search by name, email, phone, job title, location, sector, or skills..."
+                  value={searchTerm}
+                  onChange={(e) => setSearchTerm(e.target.value)}
+                  className="w-full"
+                />
+              </div>
             </div>
-            <Select value={selectedJobTitle} onValueChange={setSelectedJobTitle}>
-              <SelectTrigger className="w-full md:w-64">
-                <SelectValue placeholder="Filter by job title" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">All Job Titles</SelectItem>
-                {jobTitles.map((title) => (
-                  <SelectItem key={title} value={title}>
-                    {title}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+            
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div>
+                <Label htmlFor="job-title" className="text-sm font-medium mb-2 block">
+                  Job Title
+                </Label>
+                <Select value={selectedJobTitle} onValueChange={setSelectedJobTitle}>
+                  <SelectTrigger id="job-title">
+                    <SelectValue placeholder="All Job Titles" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">All Job Titles</SelectItem>
+                    {jobTitles.map((title) => (
+                      <SelectItem key={title} value={title}>
+                        {title}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+
+              <div>
+                <Label htmlFor="location" className="text-sm font-medium mb-2 block">
+                  Location
+                </Label>
+                <Select value={locationFilter} onValueChange={setLocationFilter}>
+                  <SelectTrigger id="location">
+                    <SelectValue placeholder="All Locations" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">All Locations</SelectItem>
+                    {locations.map((location) => (
+                      <SelectItem key={location} value={location}>
+                        {location}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+
+              <div>
+                <Label htmlFor="experience" className="text-sm font-medium mb-2 block">
+                  Years of Experience
+                </Label>
+                <Select value={experienceFilter} onValueChange={setExperienceFilter}>
+                  <SelectTrigger id="experience">
+                    <SelectValue placeholder="All Experience Levels" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">All Experience Levels</SelectItem>
+                    <SelectItem value="0-2">0-2 years</SelectItem>
+                    <SelectItem value="3-5">3-5 years</SelectItem>
+                    <SelectItem value="6-10">6-10 years</SelectItem>
+                    <SelectItem value="10+">10+ years</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+
+            {(searchTerm || selectedJobTitle !== 'all' || locationFilter !== 'all' || experienceFilter !== 'all') && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => {
+                  setSearchTerm('');
+                  setSelectedJobTitle('all');
+                  setLocationFilter('all');
+                  setExperienceFilter('all');
+                }}
+                className="text-sm"
+              >
+                Clear All Filters
+              </Button>
+            )}
           </div>
-          <div className="mt-4 text-sm text-muted-foreground">
-            Showing {filteredProfiles.length} of {profiles.length} candidates
+          
+          <div className="mt-4 pt-4 border-t flex items-center justify-between text-sm text-muted-foreground">
+            <span>
+              Showing {Math.min(currentPage * ITEMS_PER_PAGE, filteredProfiles.length)} of {filteredProfiles.length} candidates
+              {filteredProfiles.length !== profiles.length && ` (${profiles.length} total)`}
+            </span>
+            {selectedCandidates.size > 0 && (
+              <span className="font-medium text-primary">
+                {selectedCandidates.size} selected
+              </span>
+            )}
           </div>
         </Card>
 
@@ -252,26 +516,58 @@ export default function Candidates() {
             </p>
           </Card>
         ) : (
-          <div className="grid gap-4">
-            {filteredProfiles.map((profile) => (
+          <>
+            {/* Bulk Select Header */}
+            {filteredProfiles.length > 0 && (
+              <Card className="p-4 mb-4 bg-muted/50">
+                <div className="flex items-center gap-2">
+                  <Checkbox
+                    id="select-all"
+                    checked={
+                      selectedCandidates.size > 0 &&
+                      filteredProfiles
+                        .slice((currentPage - 1) * ITEMS_PER_PAGE, currentPage * ITEMS_PER_PAGE)
+                        .every(p => selectedCandidates.has(p.id))
+                    }
+                    onCheckedChange={handleSelectAll}
+                  />
+                  <Label htmlFor="select-all" className="text-sm font-medium cursor-pointer">
+                    Select all on this page
+                  </Label>
+                </div>
+              </Card>
+            )}
+            
+            <div className="grid gap-4">
+              {filteredProfiles
+                .slice((currentPage - 1) * ITEMS_PER_PAGE, currentPage * ITEMS_PER_PAGE)
+                .map((profile) => (
               <Card
                 key={profile.id}
                 className="p-6 hover:shadow-lg transition-all duration-300 bg-card/50 backdrop-blur-sm border-2 hover:border-primary/50"
               >
-                <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-                  <div className="flex-1 space-y-3">
-                    <div className="flex items-start gap-3">
-                      <div className="p-2 bg-primary/10 rounded-lg">
-                        <FileText className="h-5 w-5 text-primary" />
-                      </div>
-                      <div className="flex-1">
-                        <h3 className="text-xl font-bold text-foreground">
-                          {profile.full_name || 'Unknown'}
-                        </h3>
-                        {profile.job_title && (
-                          <div className="flex items-center gap-2 mt-1">
-                            <Briefcase className="h-4 w-4 text-muted-foreground" />
-                            <span className="text-sm text-muted-foreground">
+                <div className="flex gap-4">
+                  <div className="flex items-start pt-1">
+                    <Checkbox
+                      checked={selectedCandidates.has(profile.id)}
+                      onCheckedChange={(checked) => handleSelectCandidate(profile.id, checked as boolean)}
+                    />
+                  </div>
+                  <div className="flex-1">
+                    <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                      <div className="flex-1 space-y-3">
+                        <div className="flex items-start gap-3">
+                          <div className="p-2 bg-primary/10 rounded-lg">
+                            <FileText className="h-5 w-5 text-primary" />
+                          </div>
+                          <div className="flex-1">
+                            <h3 className="text-xl font-bold text-foreground">
+                              {profile.full_name || 'Unknown'}
+                            </h3>
+                            {profile.job_title && (
+                              <div className="flex items-center gap-2 mt-1">
+                                <Briefcase className="h-4 w-4 text-muted-foreground" />
+                                <span className="text-sm text-muted-foreground">
                               {profile.job_title}
                             </span>
                           </div>
@@ -336,13 +632,72 @@ export default function Candidates() {
                     </Button>
                   </div>
                 </div>
-              </Card>
+              </div>
+            </div>
+          </Card>
             ))}
-          </div>
+            </div>
+            
+            {/* Pagination */}
+            {filteredProfiles.length > ITEMS_PER_PAGE && (
+              <div className="flex items-center justify-center gap-2 mt-6">
+                <Button
+                  variant="outline"
+                  onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+                  disabled={currentPage === 1}
+                >
+                  Previous
+                </Button>
+                <div className="flex items-center gap-1">
+                  {Array.from({ length: Math.ceil(filteredProfiles.length / ITEMS_PER_PAGE) }, (_, i) => i + 1).map((page) => (
+                    <Button
+                      key={page}
+                      variant={currentPage === page ? "default" : "outline"}
+                      onClick={() => setCurrentPage(page)}
+                      size="sm"
+                      className="min-w-[40px]"
+                    >
+                      {page}
+                    </Button>
+                  ))}
+                </div>
+                <Button
+                  variant="outline"
+                  onClick={() => setCurrentPage(p => Math.min(Math.ceil(filteredProfiles.length / ITEMS_PER_PAGE), p + 1))}
+                  disabled={currentPage === Math.ceil(filteredProfiles.length / ITEMS_PER_PAGE)}
+                >
+                  Next
+                </Button>
+              </div>
+            )}
+          </>
         )}
       </div>
 
-      {/* Delete Confirmation Dialog */}
+      {/* Bulk Delete Confirmation Dialog */}
+      <AlertDialog open={showBulkDeleteDialog} onOpenChange={setShowBulkDeleteDialog}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete Selected Candidates?</AlertDialogTitle>
+            <AlertDialogDescription>
+              {selectedCandidates.size} candidate profile(s) will be permanently deleted. 
+              This action cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={bulkDeleting}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={handleBulkDelete}
+              disabled={bulkDeleting}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              {bulkDeleting ? 'Deleting...' : `Delete ${selectedCandidates.size} Profile(s)`}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Delete Duplicates Confirmation Dialog */}
       <AlertDialog open={showDeleteDialog} onOpenChange={setShowDeleteDialog}>
         <AlertDialogContent>
           <AlertDialogHeader>

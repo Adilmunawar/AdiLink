@@ -1,5 +1,32 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.39.3";
+import JSZip from "https://esm.sh/jszip@3.10.1";
+
+// Extract text from DOCX files (which are ZIP files containing XML)
+async function extractTextFromDocx(arrayBuffer: ArrayBuffer): Promise<string> {
+  try {
+    const zip = await JSZip.loadAsync(arrayBuffer);
+    const documentXml = await zip.file('word/document.xml')?.async('text');
+    
+    if (!documentXml) {
+      throw new Error('Could not find document.xml in DOCX file');
+    }
+    
+    // Extract text from XML tags - simple approach
+    let text = documentXml
+      .replace(/<w:p[^>]*>/g, '\n') // Paragraphs
+      .replace(/<w:br[^>]*\/>/g, '\n') // Line breaks
+      .replace(/<w:tab[^>]*\/>/g, '\t') // Tabs
+      .replace(/<[^>]+>/g, '') // Remove all XML tags
+      .replace(/\n{3,}/g, '\n\n') // Max 2 consecutive newlines
+      .trim();
+    
+    return text;
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    throw new Error(`Failed to extract text from DOCX: ${errorMessage}`);
+  }
+}
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -117,9 +144,16 @@ serve(async (req) => {
 
         sendEvent('progress', { current: 1, total: 4, step: 'Uploading file...' });
 
-        // Upload to storage
+        // Upload to storage with sanitized filename
         const fileExt = fileName.split('.').pop() || 'pdf';
-        const storagePath = `resumes/${Date.now()}_${fileName}`;
+        // Sanitize filename: replace non-ASCII characters with underscore, keep alphanumeric and basic punctuation
+        const sanitizedFileName = fileName
+          .normalize('NFD')
+          .replace(/[\u0300-\u036f]/g, '') // Remove diacritics
+          .replace(/[^\x00-\x7F]/g, '_') // Replace non-ASCII with underscore
+          .replace(/[^a-zA-Z0-9._-]/g, '_') // Replace special chars with underscore
+          .replace(/_+/g, '_'); // Replace multiple underscores with single
+        const storagePath = `resumes/${Date.now()}_${sanitizedFileName}`;
         
         const { data: uploadData, error: uploadError } = await supabaseClient.storage
           .from('resumes')
@@ -129,6 +163,7 @@ serve(async (req) => {
           });
 
         if (uploadError) {
+          console.error('Storage upload error:', uploadError);
           sendEvent('error', { message: `Storage upload failed: ${uploadError.message}` });
           controller.close();
           return;
@@ -154,57 +189,123 @@ serve(async (req) => {
         sendEvent('log', { level: 'info', message: 'Parsing resume with AI...' });
         sendEvent('progress', { current: 3, total: 4, step: 'Analyzing content...' });
 
-        // Convert ArrayBuffer to base64 in chunks to avoid stack overflow
-        const uint8Array = new Uint8Array(fileBytes);
-        let base64 = '';
-        const chunkSize = 8192;
-        for (let i = 0; i < uint8Array.length; i += chunkSize) {
-          const chunk = uint8Array.subarray(i, Math.min(i + chunkSize, uint8Array.length));
-          base64 += String.fromCharCode(...chunk);
+        let extractedText = '';
+        const fileType = file.type || '';
+        const lowerFileName = fileName.toLowerCase();
+        
+        // Handle DOCX files separately - extract text first
+        if (fileType.includes('wordprocessingml') || lowerFileName.endsWith('.docx')) {
+          try {
+            sendEvent('log', { level: 'info', message: 'Extracting text from DOCX...' });
+            extractedText = await extractTextFromDocx(fileBytes);
+            
+            if (!extractedText || extractedText.trim().length === 0) {
+              sendEvent('error', { message: 'Failed to extract text from DOCX file' });
+              controller.close();
+              return;
+            }
+            
+            sendEvent('log', { level: 'success', message: 'Text extracted from DOCX successfully' });
+          } catch (docxError) {
+            const errorMsg = docxError instanceof Error ? docxError.message : 'Unknown error';
+            console.error('DOCX extraction error:', docxError);
+            sendEvent('error', { message: `Failed to process DOCX: ${errorMsg}` });
+            controller.close();
+            return;
+          }
         }
-        const base64Data = btoa(base64);
 
+        // For DOCX with extracted text, send as text to Gemini
+        let geminiPayload;
+        if (extractedText) {
+          geminiPayload = {
+            contents: [{
+              parts: [{
+                text: `Here is the text content from a resume:\n\n${extractedText}\n\nExtract all information and return a JSON object with these fields:\n{\n  "full_name": "string",\n  "email": "string",\n  "phone_number": "string",\n  "location": "string",\n  "job_title": "string",\n  "years_of_experience": number,\n  "sector": "string",\n  "skills": ["array", "of", "strings"],\n  "experience": "string (summary of work experience)",\n  "education": "string (summary of education)",\n  "resume_text": "string (full extracted text)"\n}\n\nReturn ONLY valid JSON, no markdown or explanations.`
+              }]
+            }],
+            generationConfig: {
+              temperature: 0.1,
+              topK: 32,
+              topP: 0.9,
+              maxOutputTokens: 4096,
+            },
+            safetySettings: [
+              { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" },
+              { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_NONE" },
+              { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "BLOCK_NONE" },
+              { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_NONE" }
+            ]
+          };
+        } else {
+          // For PDF and other files, send as binary
+          const uint8Array = new Uint8Array(fileBytes);
+          let base64 = '';
+          const chunkSize = 8192;
+          for (let i = 0; i < uint8Array.length; i += chunkSize) {
+            const chunk = uint8Array.subarray(i, Math.min(i + chunkSize, uint8Array.length));
+            base64 += String.fromCharCode(...chunk);
+          }
+          const base64Data = btoa(base64);
+
+          geminiPayload = {
+            contents: [{
+              parts: [
+                {
+                  inline_data: {
+                    mime_type: fileType === 'text/plain' ? 'text/plain' : 'application/pdf',
+                    data: base64Data
+                  }
+                },
+                {
+                  text: `Extract all information from this resume and return a JSON object with these fields:\n{\n  "full_name": "string",\n  "email": "string",\n  "phone_number": "string",\n  "location": "string",\n  "job_title": "string",\n  "years_of_experience": number,\n  "sector": "string",\n  "skills": ["array", "of", "strings"],\n  "experience": "string (summary of work experience)",\n  "education": "string (summary of education)",\n  "resume_text": "string (full extracted text)"\n}\n\nReturn ONLY valid JSON, no markdown or explanations.`
+                }
+              ]
+            }],
+            generationConfig: {
+              temperature: 0.1,
+              topK: 32,
+              topP: 0.9,
+              maxOutputTokens: 4096,
+            },
+            safetySettings: [
+              { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" },
+              { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_NONE" },
+              { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "BLOCK_NONE" },
+              { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_NONE" }
+            ]
+          };
+        }
+
+        const abortController = new AbortController();
+        const timeoutId = setTimeout(() => abortController.abort(), 30000); // 30s timeout
+        
         const response = await fetch(
           `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`,
           {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              contents: [{
-                parts: [
-                  {
-                    inline_data: {
-                      mime_type: file.type || 'application/pdf',
-                      data: base64Data
-                    }
-                  },
-                  {
-                    text: `Extract all information from this resume and return a JSON object with these fields:\n{\n  "full_name": "string",\n  "email": "string",\n  "phone_number": "string",\n  "location": "string",\n  "job_title": "string",\n  "years_of_experience": number,\n  "sector": "string",\n  "skills": ["array", "of", "strings"],\n  "experience": "string (summary of work experience)",\n  "education": "string (summary of education)",\n  "resume_text": "string (full extracted text)"\n}\n\nReturn ONLY valid JSON, no markdown or explanations.`
-                  }
-                ]
-              }],
-              generationConfig: {
-                temperature: 0.2,
-                topK: 40,
-                topP: 0.95,
-                maxOutputTokens: 8192,
-              }
-            })
+            body: JSON.stringify(geminiPayload),
+            signal: abortController.signal
           }
         );
+        
+        clearTimeout(timeoutId);
 
         if (!response.ok) {
           const errorText = await response.text();
-          sendEvent('error', { message: `AI parsing failed: ${response.status}` });
+          console.error('Gemini API error:', response.status, errorText);
+          sendEvent('error', { message: `AI parsing failed: ${response.status} - ${errorText.substring(0, 200)}` });
           controller.close();
           return;
         }
 
         const result = await response.json();
-        const extractedText = result.candidates?.[0]?.content?.parts?.[0]?.text || '';
+        const aiResponseText = result.candidates?.[0]?.content?.parts?.[0]?.text || '';
         
-        if (!extractedText) {
-          sendEvent('error', { message: 'Failed to extract text from resume' });
+        if (!aiResponseText) {
+          console.error('No text extracted from Gemini response:', JSON.stringify(result).substring(0, 500));
+          sendEvent('error', { message: 'Failed to extract text - AI returned empty response' });
           controller.close();
           return;
         }
@@ -223,8 +324,8 @@ serve(async (req) => {
           return;
         }
 
-        const parsed = safeJsonParse(extractedText);
-        const normalizedProfile = normalizeProfile(parsed, extractedText, publicUrl);
+        const parsed = safeJsonParse(aiResponseText);
+        const normalizedProfile = normalizeProfile(parsed, aiResponseText, publicUrl);
 
         const { data: profile, error: dbError } = await supabaseClient
           .from('profiles')
@@ -233,6 +334,7 @@ serve(async (req) => {
           .single();
 
         if (dbError) {
+          console.error('Database insert error:', dbError);
           sendEvent('error', { message: `Database error: ${dbError.message}` });
           controller.close();
           return;

@@ -29,6 +29,8 @@ interface ProcessingLogsDialogProps {
   isComplete: boolean;
   hasError: boolean;
   onClose: () => void;
+  onCancel?: () => void;
+  estimatedTimeRemaining?: number | null;
 }
 
 export const ProcessingLogsDialog: React.FC<ProcessingLogsDialogProps> = ({
@@ -39,6 +41,8 @@ export const ProcessingLogsDialog: React.FC<ProcessingLogsDialogProps> = ({
   isComplete,
   hasError,
   onClose,
+  onCancel,
+  estimatedTimeRemaining,
 }) => {
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -82,7 +86,14 @@ export const ProcessingLogsDialog: React.FC<ProcessingLogsDialogProps> = ({
           <div className="space-y-2">
             <div className="flex justify-between text-sm">
               <span className="text-muted-foreground">Progress</span>
-              <span className="font-medium">{Math.round(progress)}%</span>
+              <div className="flex items-center gap-2">
+                <span className="font-medium">{Math.round(progress)}%</span>
+                {estimatedTimeRemaining && estimatedTimeRemaining > 0 && !isComplete && (
+                  <span className="text-xs text-muted-foreground">
+                    ~{estimatedTimeRemaining}s remaining
+                  </span>
+                )}
+              </div>
             </div>
             <Progress value={progress} className="h-2" />
           </div>
@@ -139,13 +150,19 @@ export const ProcessingLogsDialog: React.FC<ProcessingLogsDialogProps> = ({
             </ScrollArea>
           </div>
 
-          {(isComplete || hasError) && (
+          {(isComplete || hasError) ? (
             <div className="flex justify-end pt-4 border-t">
               <Button onClick={onClose} variant="default">
                 Close
               </Button>
             </div>
-          )}
+          ) : onCancel ? (
+            <div className="flex justify-end pt-4 border-t">
+              <Button onClick={onCancel} variant="destructive">
+                Cancel Upload
+              </Button>
+            </div>
+          ) : null}
         </div>
       </DialogContent>
     </Dialog>

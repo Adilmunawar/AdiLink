@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useRef } from 'react';
 import { Upload, FileText, CheckCircle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
@@ -17,7 +17,20 @@ export const ResumeUpload = () => {
   const [totalFiles, setTotalFiles] = useState(0);
   const [processedFiles, setProcessedFiles] = useState(0);
   const [droppedFiles, setDroppedFiles] = useState(0);
+  const [estimatedTimeRemaining, setEstimatedTimeRemaining] = useState<number | null>(null);
+  const [isCancelled, setIsCancelled] = useState(false);
   const { toast } = useToast();
+  const abortControllerRef = useRef<AbortController | null>(null);
+
+  const handleCancelUpload = () => {
+    setIsCancelled(true);
+    abortControllerRef.current?.abort();
+    setProcessingLogs(prev => [...prev, {
+      timestamp: new Date().toLocaleTimeString(),
+      level: 'info',
+      message: 'Upload cancelled by user'
+    }]);
+  };
 
   const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const files = event.target.files;
@@ -69,22 +82,34 @@ export const ResumeUpload = () => {
     setTotalFiles(validFiles.length);
     setProcessedFiles(0);
     setDroppedFiles(0);
+    setUploadedCount(0);
+    setEstimatedTimeRemaining(null);
+    setIsCancelled(false);
+    abortControllerRef.current = new AbortController();
     let successCount = 0;
+    const startTime = Date.now();
 
     try {
       const { data: { session } } = await supabase.auth.getSession();
       if (!session?.access_token) throw new Error('No active session found');
 
-      // Process files in parallel batches of 3
-      const BATCH_SIZE = 3;
+      // Process files in parallel batches of 8 for faster bulk uploads
+      const BATCH_SIZE = 8;
       const batches: File[][] = [];
       for (let i = 0; i < validFiles.length; i += BATCH_SIZE) {
         batches.push(validFiles.slice(i, i + BATCH_SIZE));
       }
 
       for (const batch of batches) {
+        if (isCancelled || abortControllerRef.current?.signal.aborted) {
+          break;
+        }
+        
         // Process batch in parallel
         const batchPromises = batch.map(async (file) => {
+          if (abortControllerRef.current?.signal.aborted) {
+            return { success: false, fileName: file.name, cancelled: true };
+          }
           const formData = new FormData();
           formData.append('file', file);
           formData.append('fileName', file.name);
@@ -98,6 +123,7 @@ export const ResumeUpload = () => {
                   'Authorization': `Bearer ${session.access_token}`,
                 },
                 body: formData,
+                signal: abortControllerRef.current?.signal,
               }
             );
 
@@ -110,6 +136,8 @@ export const ResumeUpload = () => {
             let buffer = '';
             let fileSuccess = false;
 
+            let currentEvent = '';
+            
             while (true) {
               const { done, value } = await reader.read();
               if (done) break;
@@ -120,19 +148,43 @@ export const ResumeUpload = () => {
 
               for (const line of lines) {
                 if (!line.trim() || line.startsWith(':')) continue;
+                
+                // Track event type
+                if (line.startsWith('event:')) {
+                  currentEvent = line.slice(6).trim();
+                  continue;
+                }
+                
                 if (line.startsWith('data:')) {
-                  const data = JSON.parse(line.slice(5).trim());
-                  
-                  if (data.level && data.message) {
-                    setProcessingLogs(prev => [...prev, {
-                      timestamp: new Date().toLocaleTimeString(),
-                      level: data.level,
-                      message: data.message
-                    }]);
-                  }
-                  
-                  if (data.success) {
-                    fileSuccess = true;
+                  try {
+                    const data = JSON.parse(line.slice(5).trim());
+                    
+                    // Handle log events
+                    if (data.level && data.message) {
+                      setProcessingLogs(prev => [...prev, {
+                        timestamp: new Date().toLocaleTimeString(),
+                        level: data.level,
+                        message: data.message
+                      }]);
+                    }
+                    
+                    // Handle complete event
+                    if (currentEvent === 'complete' && data.success) {
+                      fileSuccess = true;
+                    }
+                    
+                    // Handle error event
+                    if (currentEvent === 'error') {
+                      setProcessingLogs(prev => [...prev, {
+                        timestamp: new Date().toLocaleTimeString(),
+                        level: 'error',
+                        message: data.message || 'Processing failed'
+                      }]);
+                    }
+                    
+                    currentEvent = ''; // Reset after processing
+                  } catch (parseError) {
+                    console.error('Failed to parse SSE data:', parseError);
                   }
                 }
               }
@@ -152,31 +204,51 @@ export const ResumeUpload = () => {
         const batchResults = await Promise.all(batchPromises);
         
         let failedInBatch = 0;
+        let cancelledInBatch = 0;
         batchResults.forEach(result => {
           if (result.success) {
             successCount++;
-          } else {
+          } else if (!(result as any).cancelled) {
             failedInBatch++;
+          } else {
+            cancelledInBatch++;
           }
-          setProcessedFiles(prev => prev + 1);
+          if (!(result as any).cancelled) {
+            setProcessedFiles(prev => prev + 1);
+          }
         });
 
         setDroppedFiles(prev => prev + failedInBatch);
         const currentProcessed = successCount + failedInBatch;
         setProgress((currentProcessed / validFiles.length) * 100);
+        
+        // Update time estimation
+        const elapsedTime = Date.now() - startTime;
+        const avgTimePerFile = elapsedTime / currentProcessed;
+        const remainingFiles = validFiles.length - currentProcessed;
+        setEstimatedTimeRemaining(Math.ceil((avgTimePerFile * remainingFiles) / 1000));
       }
 
-      setUploadedCount(prev => prev + successCount);
+      setUploadedCount(successCount);
       setIsComplete(true);
+      setEstimatedTimeRemaining(null);
       
-      const failedCount = validFiles.length - successCount;
-      toast({
-        title: failedCount === 0 ? 'Success!' : 'Partially Complete',
-        description: failedCount === 0 
-          ? `Successfully uploaded ${successCount} resume(s)`
-          : `Uploaded ${successCount} resume(s), ${failedCount} failed`,
-        variant: failedCount === 0 ? 'default' : 'destructive',
-      });
+      if (isCancelled || abortControllerRef.current?.signal.aborted) {
+        toast({
+          title: 'Upload Cancelled',
+          description: `Processed ${successCount} resume(s) before cancellation`,
+          variant: 'default',
+        });
+      } else {
+        const failedCount = validFiles.length - successCount;
+        toast({
+          title: failedCount === 0 ? 'Success!' : 'Partially Complete',
+          description: failedCount === 0 
+            ? `Successfully uploaded ${successCount} resume(s)`
+            : `Uploaded ${successCount} resume(s), ${failedCount} failed`,
+          variant: failedCount === 0 ? 'default' : 'destructive',
+        });
+      }
       event.target.value = '';
     } catch (error) {
       setHasError(true);
@@ -255,6 +327,8 @@ export const ResumeUpload = () => {
           setIsComplete(false);
           setHasError(false);
         }}
+        onCancel={uploading ? handleCancelUpload : undefined}
+        estimatedTimeRemaining={estimatedTimeRemaining}
       />
     </Card>
   );
