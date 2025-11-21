@@ -147,7 +147,7 @@ const Auth = () => {
                     <Input
                       id="signup-name"
                       type="text"
-                      placeholder="John Doe"
+                      placeholder="Adil Munawar"
                       value={fullName}
                       onChange={(e) => setFullName(e.target.value)}
                       required={!isLogin}
@@ -158,7 +158,7 @@ const Auth = () => {
                     <Input
                       id="signup-email"
                       type="email"
-                      placeholder="your@email.com"
+                      placeholder="Adil@Nexus.com"
                       value={email}
                       onChange={(e) => setEmail(e.target.value)}
                       required
